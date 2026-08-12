@@ -29,6 +29,7 @@ vein run [-n NAME] [--root DIR] [-x PATTERN] [--no-time] -- COMMAND ...
 vein list
 vein show [RUN] [--by self|cum|calls] [-n ROWS]
 vein dead [RUN ...] [--strict] [--json]
+vein diff BEFORE AFTER [--strict] [--structure-only] [--json]
 ```
 
 Recordings land in `.vein/runs/<name>.json` — plain JSON, safe to commit or
@@ -71,6 +72,48 @@ recorded entry point counts as live. Functions registered by decorator
 because a framework may call them later; pass `--include-registered` to see
 them. `--strict` exits 1, which makes it a CI gate.
 
+## Diff two runs
+
+The flagship. Record twice, then ask what actually changed:
+
+```console
+$ vein run -n before -- python -m examples.shop.main
+$ vein run -n after  -- python -m examples.shop.main --fast
+$ vein diff before after
+── diff before → after ───────────────────────────────────────────────
+  execution changed: -5 functions, -5 call paths
+  7 shared functions, 7 shared call paths
+
+── only in before (5) ────────────────────────────────────────────────
+  - examples/shop/cart.py:line_total  (3 calls)
+  - examples/shop/pricing.py:bulk_discount  (3 calls)
+  ...
+── call paths only in before (5) ─────────────────────────────────────
+  - cart.checkout → cart.line_total
+  - cart.line_total → pricing.bulk_discount
+```
+
+Two things this is very good at:
+
+**Proving a refactor was behaviour-preserving.** Record before, record after,
+and if `vein diff` says *identical execution: same functions, same call paths,
+same counts*, the program genuinely took the same route. `--strict` exits 1 on
+any change, so it works as a CI gate:
+
+```yaml
+- run: vein run -n base -- pytest -q          # on the base commit
+- run: vein run -n head -- pytest -q          # on the PR
+- run: vein diff base head --strict --structure-only
+```
+
+**Explaining a flag, an env var, or a bug.** The call paths present on only one
+side *are* the branch that differs. No stepping through a debugger to find
+where two runs part ways.
+
+Functions are matched on `(file, qualname)`, so moving a function within its
+file is not reported as a change. `--ignore-imports` drops module-level frames
+when import order is noisy.
+
 ## How it works
 
 `vein run` writes two tiny files into a scratch directory and puts it at the
@@ -90,9 +133,8 @@ and deletes the scratch directory.
 
 ## Status
 
-Working today: `run`, `list`, `show`, `dead`.
-In progress: `diff` (what changed at runtime between two runs) and a
-self-contained HTML report.
+Working today: `run`, `list`, `show`, `dead`, `diff`.
+In progress: a self-contained HTML report.
 
 ## License
 

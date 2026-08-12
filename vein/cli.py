@@ -8,6 +8,7 @@ import os
 import sys
 
 from . import __version__, runner, static_scan, term
+from .diff import diff_runs, edge_text
 from .store import list_runs, load_run, safe_name
 
 USAGE = """vein — see what your code actually does when it runs
@@ -16,6 +17,7 @@ USAGE = """vein — see what your code actually does when it runs
   vein list                            show recorded runs
   vein show <run>                      summarise a run in the terminal
   vein dead                            functions no recorded run ever executed
+  vein diff <before> <after>           what changed at runtime between two runs
 """
 
 
@@ -282,6 +284,114 @@ def cmd_dead(args) -> int:
     return 1 if args.strict else 0
 
 
+def cmd_diff(args) -> int:
+    root = find_root(args.root)
+    try:
+        before = load_run(root, args.before)
+        after = load_run(root, args.after)
+    except (LookupError, ValueError) as exc:
+        print(f"vein: {exc}", file=sys.stderr)
+        return 2
+
+    result = diff_runs(before, after, ignore_modules=args.ignore_imports)
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "before": before.name,
+                    "after": after.name,
+                    "identical": result.identical,
+                    "headline": result.headline(),
+                    "only_before": [f.label for f in result.only_a],
+                    "only_after": [f.label for f in result.only_b],
+                    "call_deltas": [
+                        {
+                            "function": f"{d.file}:{d.qualname}",
+                            "before": d.before,
+                            "after": d.after,
+                        }
+                        for d in result.call_deltas
+                    ],
+                    "edges_only_before": [list(e) for e in result.edges_only_a],
+                    "edges_only_after": [list(e) for e in result.edges_only_b],
+                },
+                indent=2,
+            )
+        )
+        return 1 if args.strict and not result.identical else 0
+
+    print(term.rule(f"diff {before.name} → {after.name}"))
+    tone = "green" if result.identical and result.call_counts_identical else "yellow"
+    print("  " + term.paint(result.headline(), tone, "bold"))
+    print(
+        term.paint(
+            f"  {result.shared} shared functions, {result.shared_edges} shared "
+            f"call paths",
+            "grey",
+        )
+    )
+
+    limit = args.limit
+    _section(
+        f"only in {after.name}",
+        [f"{term.paint('+', 'green')} {f.label}  ({term.count(f.calls)} calls)" for f in result.only_b],
+        limit,
+    )
+    _section(
+        f"only in {before.name}",
+        [f"{term.paint('-', 'red')} {f.label}  ({term.count(f.calls)} calls)" for f in result.only_a],
+        limit,
+    )
+    _section(
+        f"call paths only in {after.name}",
+        [f"{term.paint('+', 'green')} {edge_text(e)}" for e in result.edges_only_b],
+        limit,
+    )
+    _section(
+        f"call paths only in {before.name}",
+        [f"{term.paint('-', 'red')} {edge_text(e)}" for e in result.edges_only_a],
+        limit,
+    )
+
+    if result.call_deltas and not args.structure_only:
+        print()
+        print(term.rule("call count changes"))
+        rows = []
+        for delta in result.call_deltas[:limit]:
+            arrow = "↑" if delta.delta > 0 else "↓"
+            colour = "green" if delta.delta > 0 else "red"
+            rows.append(
+                [
+                    term.paint(f"{arrow}{abs(delta.delta)}", colour),
+                    f"{delta.before} → {delta.after}",
+                    term.truncate(delta.file, 40),
+                    term.paint(term.truncate(delta.qualname, 34), "bold"),
+                ]
+            )
+        print(term.table(rows, ["DELTA", "CALLS", "FILE", "FUNCTION"], "rrll"))
+        if len(result.call_deltas) > limit:
+            print(term.paint(f"  … and {len(result.call_deltas) - limit} more", "grey"))
+
+    if args.strict:
+        changed = not result.identical or (
+            not args.structure_only and not result.call_counts_identical
+        )
+        return 1 if changed else 0
+    return 0
+
+
+def _section(title: str, lines: list[str], limit: int) -> None:
+    if not lines:
+        return
+    print()
+    print(term.rule(f"{title} ({len(lines)})"))
+    for line in lines[:limit]:
+        print("  " + line)
+    if len(lines) > limit:
+        print(term.paint(f"  … and {len(lines) - limit} more", "grey"))
+
+
 # ---------------------------------------------------------------------------
 # parser
 # ---------------------------------------------------------------------------
@@ -350,6 +460,31 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="also report decorator-registered callbacks (routes, fixtures, …)",
     )
+
+    p_diff = sub.add_parser(
+        "diff",
+        help="compare what two recordings actually executed",
+        parents=[common],
+    )
+    p_diff.add_argument("before", help="baseline run")
+    p_diff.add_argument("after", help="run to compare against the baseline")
+    p_diff.add_argument("-n", "--limit", type=int, default=15, help="rows per section")
+    p_diff.add_argument("--json", action="store_true", help="machine-readable output")
+    p_diff.add_argument(
+        "--strict",
+        action="store_true",
+        help="exit 1 if execution changed (behaviour gate for CI)",
+    )
+    p_diff.add_argument(
+        "--structure-only",
+        action="store_true",
+        help="ignore call-count changes; compare only functions and call paths",
+    )
+    p_diff.add_argument(
+        "--ignore-imports",
+        action="store_true",
+        help="ignore module-level <module> frames (import order noise)",
+    )
     return parser
 
 
@@ -379,6 +514,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_show(args)
     if args.command == "dead":
         return cmd_dead(args)
+    if args.command == "diff":
+        return cmd_diff(args)
 
     parser.print_help()
     return 0
