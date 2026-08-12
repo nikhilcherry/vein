@@ -30,6 +30,7 @@ vein list
 vein show [RUN] [--by self|cum|calls] [-n ROWS]
 vein dead [RUN ...] [--strict] [--json]
 vein diff BEFORE AFTER [--strict] [--structure-only] [--json]
+vein report [RUN] [-o FILE] [--open]
 ```
 
 Recordings land in `.vein/runs/<name>.json` — plain JSON, safe to commit or
@@ -114,6 +115,17 @@ Functions are matched on `(file, qualname)`, so moving a function within its
 file is not reported as a change. `--ignore-imports` drops module-level frames
 when import order is noisy.
 
+## Read it in a browser
+
+```bash
+vein report --open
+```
+
+One HTML file, no external assets, ~30 KB for a mid-sized run. Files grouped by
+cost, functions that never ran shown greyed out in place, and a side panel that
+walks the call graph — click a function to see who called it and what it called,
+then click through.
+
 ## How it works
 
 `vein run` writes two tiny files into a scratch directory and puts it at the
@@ -133,8 +145,10 @@ and deletes the scratch directory.
 
 ## Status
 
-Working today: `run`, `list`, `show`, `dead`, `diff`.
-In progress: a self-contained HTML report.
+`run`, `list`, `show`, `dead`, `diff`, `report` all work today.
+
+vein records its own test suite in CI and diffs two consecutive runs, so the
+tool is exercised by the tool.
 
 ## License
 

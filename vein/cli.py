@@ -18,6 +18,7 @@ USAGE = """vein — see what your code actually does when it runs
   vein show <run>                      summarise a run in the terminal
   vein dead                            functions no recorded run ever executed
   vein diff <before> <after>           what changed at runtime between two runs
+  vein report <run>                    write a self-contained HTML report
 """
 
 
@@ -381,6 +382,40 @@ def cmd_diff(args) -> int:
     return 0
 
 
+def cmd_report(args) -> int:
+    from . import report as report_module
+
+    root = find_root(args.root)
+    try:
+        run = load_run(root, args.run)
+    except (LookupError, ValueError) as exc:
+        print(f"vein: {exc}", file=sys.stderr)
+        return 1
+
+    definitions = []
+    if not args.no_dead:
+        definitions = static_scan.scan_project(root, tuple(args.exclude or ()))
+    html = report_module.render_report(
+        run, definitions, include_dead=not args.no_dead
+    )
+
+    out = args.output or f"vein-{run.name}.html"
+    with open(out, "w", encoding="utf-8") as fh:
+        fh.write(html)
+    size = os.path.getsize(out) / 1024
+    print(
+        term.paint("vein: ", "grey")
+        + f"report written to "
+        + term.paint(out, "cyan")
+        + term.paint(f"  ({size:.0f} KB, no external assets)", "grey")
+    )
+    if args.open:
+        import webbrowser
+
+        webbrowser.open("file://" + os.path.abspath(out))
+    return 0
+
+
 def _section(title: str, lines: list[str], limit: int) -> None:
     if not lines:
         return
@@ -485,6 +520,21 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="ignore module-level <module> frames (import order noise)",
     )
+
+    p_report = sub.add_parser(
+        "report",
+        help="write a self-contained HTML report for a run",
+        parents=[common],
+    )
+    p_report.add_argument("run", nargs="?", default=None, help="run name (default: latest)")
+    p_report.add_argument("-o", "--output", help="output path (default: vein-<run>.html)")
+    p_report.add_argument("--open", action="store_true", help="open it in a browser")
+    p_report.add_argument(
+        "-x", "--exclude", action="append", help="substring of paths to ignore"
+    )
+    p_report.add_argument(
+        "--no-dead", action="store_true", help="skip the never-executed functions"
+    )
     return parser
 
 
@@ -516,6 +566,14 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_dead(args)
     if args.command == "diff":
         return cmd_diff(args)
+    if args.command == "report":
+        if args.run is None:
+            runs = list_runs(find_root(args.root))
+            if not runs:
+                print("no runs recorded yet — try: vein run -- pytest", file=sys.stderr)
+                return 1
+            args.run = runs[0]
+        return cmd_report(args)
 
     parser.print_help()
     return 0

@@ -418,3 +418,60 @@ def test_table_aligns_around_ansi_escapes():
         term.set_color(False)
     assert "\033[31m" in rendered
     assert len(rendered.splitlines()) == 2
+
+
+# ---------------------------------------------------------------------------
+# report
+# ---------------------------------------------------------------------------
+
+
+def test_report_is_self_contained(project, tmp_path):
+    from vein.report import render_report
+
+    record(project, "slow")
+    run = load_run(str(project), "slow")
+    page = render_report(run, static_scan.scan_project(str(project)))
+
+    assert page.startswith("<!doctype html>")
+    # No external asset may be fetched: the page must work offline, from disk.
+    for pattern in ("<script src=", "<link rel=\"stylesheet\"", "@import", "//cdn"):
+        assert pattern not in page
+    assert "const DATA = {" in page
+    assert "never_called" in page  # dead functions are shown inline
+
+
+def test_report_payload_marks_dead_functions(project):
+    from vein.report import build_payload
+
+    record(project, "slow")
+    run = load_run(str(project), "slow")
+    functions, edges = build_payload(
+        run, static_scan.scan_project(str(project)), include_dead=True
+    )
+    dead = {f["qualname"] for f in functions if f["dead"]}
+    assert dead == {"never_called"}
+    assert all(f["id"] == i for i, f in enumerate(functions))
+    assert edges, "the call graph should not be empty"
+
+
+def test_report_escapes_html_in_names(tmp_path):
+    from vein.report import render_report
+
+    run = Run(
+        name="x<script>",
+        argv=["python", "<evil>"],
+        functions=[Func("a<b>.py", 1, "f", calls=1)],
+    )
+    page = render_report(run)
+    assert "<script>alert" not in page
+    assert "&lt;evil&gt;" in page
+
+
+def test_report_command_writes_a_file(project, monkeypatch, tmp_path):
+    record(project, "slow")
+    monkeypatch.chdir(tmp_path)
+    out = tmp_path / "r.html"
+    assert cli.main(
+        ["report", "slow", "--root", str(project), "-o", str(out), "--no-color"]
+    ) == 0
+    assert out.stat().st_size > 4000
