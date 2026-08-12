@@ -143,12 +143,35 @@ into one graph.
 On exit each process dumps its slice of the graph; `vein` folds them together
 and deletes the scratch directory.
 
+## Overhead
+
+| workload | baseline | traced |
+|---|---|---|
+| this project's pytest suite | 1.01s | 1.20s |
+| 800k calls of a one-line function | 0.02s | 0.81s |
+
+The second row is the honest worst case: functions small enough that the
+tracing callbacks dwarf the actual work. Normal code costs roughly 20%. Pass
+`--no-time` to skip timing entirely when you only care about structure — which
+is all `dead` and `diff --structure-only` need. Run `bench/overhead.sh` to
+measure it on your own machine.
+
+Tracing a long-running process? Stop it however you like: `vein` flushes the
+recording on `SIGTERM` as well as on normal exit, so `vein run -- ./serve` then
+Ctrl-C (or `kill`) still gives you the graph.
+
 ## Status
 
 `run`, `list`, `show`, `dead`, `diff`, `report` all work today.
 
 vein records its own test suite in CI and diffs two consecutive runs, so the
 tool is exercised by the tool.
+
+## Design notes
+
+[`docs/DESIGN.md`](docs/DESIGN.md) covers the injection trick, the PEP 669
+filtering, the timing bookkeeping, and — importantly — what vein cannot tell
+you.
 
 ## License
 

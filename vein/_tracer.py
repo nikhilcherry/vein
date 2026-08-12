@@ -310,7 +310,13 @@ def install():
     backend = _make_backend(recorder)
     _ACTIVE = (recorder, backend)
 
+    dumped = []
+
     def dump():
+        # atexit and the signal handler can both fire; write exactly once.
+        if dumped:
+            return
+        dumped.append(True)
         backend.stop()
         try:
             data = recorder.snapshot()
@@ -326,4 +332,39 @@ def install():
             pass
 
     atexit.register(dump)
+    _install_signal_dump(dump)
     return _ACTIVE
+
+
+def _install_signal_dump(dump):
+    """Also write the recording when the process is terminated by a signal.
+
+    ``atexit`` does not run on SIGTERM, so without this a traced server -- the
+    exact thing you most want a call graph of -- would produce nothing when
+    stopped. Any handler the program had already installed is still called.
+    """
+    import signal
+
+    names = ("SIGTERM", "SIGHUP", "SIGQUIT")
+    for name in names:
+        sig = getattr(signal, name, None)
+        if sig is None:
+            continue
+        try:
+            previous = signal.getsignal(sig)
+        except (ValueError, OSError):  # pragma: no cover - not the main thread
+            continue
+
+        def handler(signum, frame, previous=previous):
+            dump()
+            if callable(previous):
+                return previous(signum, frame)
+            if previous == signal.SIG_IGN:
+                return None
+            signal.signal(signum, signal.SIG_DFL)
+            os.kill(os.getpid(), signum)
+
+        try:
+            signal.signal(sig, handler)
+        except (ValueError, OSError):  # pragma: no cover - not the main thread
+            pass

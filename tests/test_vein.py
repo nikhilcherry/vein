@@ -475,3 +475,48 @@ def test_report_command_writes_a_file(project, monkeypatch, tmp_path):
         ["report", "slow", "--root", str(project), "-o", str(out), "--no-color"]
     ) == 0
     assert out.stat().st_size > 4000
+
+
+def test_recording_survives_sigterm(tmp_path):
+    """A server killed with SIGTERM must still leave a usable recording."""
+    import signal
+    import time
+
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\n")
+    (tmp_path / "server.py").write_text(
+        "import time\n"
+        "def serve():\n"
+        "    print('up', flush=True)\n"
+        "    while True:\n"
+        "        time.sleep(0.05)\n"
+        "serve()\n"
+    )
+    scratch = tmp_path / "scratch"
+    out_dir = scratch / "parts"
+    out_dir.mkdir(parents=True)
+    inject = runner._prepare_shim(str(scratch))
+    env = runner.build_env(
+        os.environ, inject, str(out_dir), [str(tmp_path)], []
+    )
+    proc = subprocess.Popen(
+        [sys.executable, str(tmp_path / "server.py")],
+        env=env,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert proc.stdout.readline().strip() == "up"
+        proc.send_signal(signal.SIGTERM)
+        proc.wait(timeout=10)
+    finally:
+        if proc.poll() is None:  # pragma: no cover - only on a hang
+            proc.kill()
+
+    deadline = time.time() + 5
+    parts = []
+    while time.time() < deadline and not parts:
+        parts = [str(p) for p in out_dir.glob("*.json")]
+        time.sleep(0.05)
+    assert parts, "SIGTERM should still have flushed a recording"
+    functions, _, _, _ = runner.merge_parts(parts, str(tmp_path))
+    assert "serve" in {f.qualname for f in functions}
