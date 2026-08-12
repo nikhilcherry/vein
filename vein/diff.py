@@ -85,8 +85,25 @@ class RunDiff:
         return "execution changed: " + ", ".join(parts)
 
 
-def _is_module_edge(edge) -> bool:
-    return any(part.endswith(":<module>") for part in edge)
+def _is_module(label: str) -> bool:
+    return label.endswith(":<module>")
+
+
+def _contract_modules(edges: set) -> set:
+    """Remove module frames from a set of edges without severing the graph.
+
+    A ``<module>`` frame is import machinery, not application structure. It is
+    not enough to drop those edges: a function called during import would then
+    look unreachable on one side and freshly reachable on the other. Instead,
+    calls *out of* a module frame are re-attached to the entry point, and calls
+    *into* one are dropped.
+    """
+    out = set()
+    for src, dst in edges:
+        if _is_module(dst):
+            continue
+        out.add(("<entry>" if _is_module(src) else src, dst))
+    return out
 
 
 def diff_runs(a: Run, b: Run, *, ignore_modules: bool = False) -> RunDiff:
@@ -116,8 +133,8 @@ def diff_runs(a: Run, b: Run, *, ignore_modules: bool = False) -> RunDiff:
     edges_a = set(a.edge_keys())
     edges_b = set(b.edge_keys())
     if ignore_modules:
-        edges_a = {e for e in edges_a if not _is_module_edge(e)}
-        edges_b = {e for e in edges_b if not _is_module_edge(e)}
+        edges_a = _contract_modules(edges_a)
+        edges_b = _contract_modules(edges_b)
 
     return RunDiff(
         a=a,

@@ -1,0 +1,37 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 exercises the sys.setprofile fallback; 3.12+ uses sys.monitoring.
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install pytest
+      - run: pip install -e .
+      - run: pytest -q
+
+  dogfood:
+    # vein records its own test suite, then proves the recording is stable.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install pytest && pip install -e .
+      - run: vein run -n suite-a -- python -m pytest -q tests/
+      - run: vein run -n suite-b -- python -m pytest -q tests/
+      - run: vein show suite-a --no-color
+      - run: vein diff suite-a suite-b --no-color --structure-only --strict
