@@ -28,6 +28,7 @@ events for code outside your project, so third-party frames cost nothing.
 vein run [-n NAME] [--root DIR] [-x PATTERN] [--no-time] -- COMMAND ...
 vein list
 vein show [RUN] [--by self|cum|calls] [-n ROWS]
+vein dead [RUN ...] [--strict] [--json]
 ```
 
 Recordings land in `.vein/runs/<name>.json` — plain JSON, safe to commit or
@@ -49,6 +50,27 @@ $ vein show slow
 ████▌           1   78.0µs  137.3µs  examples/shop/cart.py:11  checkout
 ```
 
+## Find code that never runs
+
+`vein dead` walks your source with `ast`, builds the full inventory of
+functions you *define*, and subtracts everything any recording actually
+executed. Not "is this symbol referenced?" — "did this ever run?".
+
+```console
+$ vein dead
+── dead code vs 2 run(s): fast, slow ─────────────────────────────────
+  8/9 defined functions executed (89%), 1 never ran (3 lines)
+
+LINES  KIND      FILE                         FUNCTION
+    3  function  examples/shop/pricing.py:22  legacy_coupon
+```
+
+Coverage is the **union of every run**, so a function exercised by any one
+recorded entry point counts as live. Functions registered by decorator
+(`@app.route`, `@pytest.fixture`, `@abstractmethod`, …) are skipped by default
+because a framework may call them later; pass `--include-registered` to see
+them. `--strict` exits 1, which makes it a CI gate.
+
 ## How it works
 
 `vein run` writes two tiny files into a scratch directory and puts it at the
@@ -68,9 +90,9 @@ and deletes the scratch directory.
 
 ## Status
 
-Working today: `run`, `list`, `show`.
-In progress: `dead` (functions never executed), `diff` (what changed at runtime
-between two runs), and a self-contained HTML report.
+Working today: `run`, `list`, `show`, `dead`.
+In progress: `diff` (what changed at runtime between two runs) and a
+self-contained HTML report.
 
 ## License
 

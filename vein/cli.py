@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 
-from . import __version__, runner, term
+from . import __version__, runner, static_scan, term
 from .store import list_runs, load_run, safe_name
 
 USAGE = """vein — see what your code actually does when it runs
@@ -14,6 +15,7 @@ USAGE = """vein — see what your code actually does when it runs
   vein run -- pytest tests/            record a run
   vein list                            show recorded runs
   vein show <run>                      summarise a run in the terminal
+  vein dead                            functions no recorded run ever executed
 """
 
 
@@ -189,6 +191,97 @@ def cmd_show(args) -> int:
     return 0
 
 
+def _executed_keys(root: str, names: list[str]) -> tuple[set, list[str]]:
+    """Union of every function observed across the given (or all) runs."""
+    names = names or list_runs(root)
+    executed: set = set()
+    used: list[str] = []
+    for name in names:
+        try:
+            run = load_run(root, name)
+        except (LookupError, ValueError) as exc:
+            print(f"vein: {exc}", file=sys.stderr)
+            continue
+        used.append(run.name)
+        executed.update(f.key for f in run.functions)
+    return executed, used
+
+
+def cmd_dead(args) -> int:
+    root = find_root(args.root)
+    executed, used = _executed_keys(root, args.runs)
+    if not used:
+        print(
+            "vein: no runs to compare against — record one first "
+            "(vein run -- pytest)",
+            file=sys.stderr,
+        )
+        return 1
+
+    definitions = static_scan.scan_project(root, tuple(args.exclude or ()))
+    dead = static_scan.dead_functions(
+        definitions, executed, include_registered=args.include_registered
+    )
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "runs": used,
+                    "defined": len(definitions),
+                    "executed": len(definitions) - len(dead),
+                    "dead": [
+                        {
+                            "file": d.file,
+                            "line": d.line,
+                            "qualname": d.qualname,
+                            "kind": d.kind,
+                            "lines": d.lines,
+                        }
+                        for d in dead
+                    ],
+                },
+                indent=2,
+            )
+        )
+        return 1 if dead and args.strict else 0
+
+    covered = len(definitions) - len(dead)
+    share = covered / len(definitions) * 100 if definitions else 100.0
+    print(term.rule(f"dead code vs {len(used)} run(s): {', '.join(used)}"))
+    print(
+        f"  {covered}/{len(definitions)} defined functions executed "
+        f"({share:.0f}%), {len(dead)} never ran "
+        f"({sum(d.lines for d in dead)} lines)"
+    )
+    if not dead:
+        print(term.paint("  nothing unused — every function ran at least once", "green"))
+        return 0
+
+    print()
+    rows = [
+        [
+            term.paint(str(d.lines), "yellow"),
+            d.kind,
+            term.truncate(f"{d.file}:{d.line}", 48),
+            term.paint(term.truncate(d.qualname, 40), "bold"),
+        ]
+        for d in dead[: args.limit]
+    ]
+    print(term.table(rows, ["LINES", "KIND", "FILE", "FUNCTION"], "rlll"))
+    if len(dead) > args.limit:
+        print(term.paint(f"  … and {len(dead) - args.limit} more", "grey"))
+    print()
+    print(
+        term.paint(
+            "  Dead here means: not executed by these recordings. Record more "
+            "entry points before deleting anything.",
+            "grey",
+        )
+    )
+    return 1 if args.strict else 0
+
+
 # ---------------------------------------------------------------------------
 # parser
 # ---------------------------------------------------------------------------
@@ -235,6 +328,28 @@ def build_parser() -> argparse.ArgumentParser:
         default="self",
         help="ranking metric (default: self time)",
     )
+
+    p_dead = sub.add_parser(
+        "dead",
+        help="functions defined in the project that no recorded run executed",
+        parents=[common],
+    )
+    p_dead.add_argument(
+        "runs", nargs="*", help="runs to count as coverage (default: all of them)"
+    )
+    p_dead.add_argument(
+        "-x", "--exclude", action="append", help="substring of paths to ignore"
+    )
+    p_dead.add_argument("-n", "--limit", type=int, default=30, help="rows to show")
+    p_dead.add_argument("--json", action="store_true", help="machine-readable output")
+    p_dead.add_argument(
+        "--strict", action="store_true", help="exit 1 when dead code is found (CI)"
+    )
+    p_dead.add_argument(
+        "--include-registered",
+        action="store_true",
+        help="also report decorator-registered callbacks (routes, fixtures, …)",
+    )
     return parser
 
 
@@ -262,6 +377,8 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
             args.run = runs[0]
         return cmd_show(args)
+    if args.command == "dead":
+        return cmd_dead(args)
 
     parser.print_help()
     return 0
