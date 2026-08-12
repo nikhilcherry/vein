@@ -520,3 +520,34 @@ def test_recording_survives_sigterm(tmp_path):
     assert parts, "SIGTERM should still have flushed a recording"
     functions, _, _, _ = runner.merge_parts(parts, str(tmp_path))
     assert "serve" in {f.qualname for f in functions}
+
+
+def test_paths_walks_back_to_the_entry_point(project):
+    record(project, "slow")
+    run = load_run(str(project), "slow")
+    [leaf] = run.find("leaf")
+    chains = run.paths_to(leaf)
+    assert chains, "leaf is called, so it must have at least one path"
+    for chain in chains:
+        assert chain[-1] == leaf
+        names = [run.functions[i].qualname for i in chain]
+        assert "middle" in names or "main" in names
+
+
+def test_paths_does_not_loop_on_recursion(tmp_path):
+    run = Run(
+        name="r",
+        functions=[Func("a.py", 1, "f"), Func("a.py", 5, "g")],
+        edges={(-1, 0): 1, (0, 1): 1, (1, 0): 1},  # f -> g -> f
+    )
+    chains = run.paths_to(0, limit=5)
+    assert chains and all(len(c) <= 3 for c in chains)
+
+
+def test_find_prefers_an_exact_qualname_match():
+    run = Run(
+        name="r",
+        functions=[Func("a.py", 1, "run"), Func("a.py", 5, "run_again")],
+    )
+    assert run.find("run") == [0]
+    assert set(run.find("run_")) == {1}

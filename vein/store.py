@@ -148,6 +148,47 @@ class Run:
             out.setdefault(a, []).append((b, count))
         return out
 
+    def find(self, pattern: str) -> list[int]:
+        """Indices of functions whose label contains ``pattern`` (case-fold)."""
+        needle = pattern.lower()
+        exact = [
+            i for i, f in enumerate(self.functions) if f.qualname.lower() == needle
+        ]
+        if exact:
+            return exact
+        return [
+            i for i, f in enumerate(self.functions) if needle in f.label.lower()
+        ]
+
+    def paths_to(self, target: int, limit: int = 12, max_depth: int = 24) -> list[list[int]]:
+        """Distinct call chains from an entry point down to ``target``.
+
+        Walks the graph backwards from the target. Cycles are cut where they
+        close: recursion shows up once, not as an infinite family of chains.
+        """
+        callers = self.callers_of()
+        found: list[list[int]] = []
+
+        def walk(node: int, chain: list[int], seen: set) -> None:
+            if len(found) >= limit or len(chain) > max_depth:
+                return
+            parents = sorted(
+                callers.get(node, []), key=lambda pair: -pair[1]
+            )
+            if not parents:
+                found.append(list(reversed(chain)))
+                return
+            for parent, _count in parents:
+                if parent < 0:  # the process entry point
+                    found.append(list(reversed(chain)))
+                elif parent not in seen:
+                    walk(parent, chain + [parent], seen | {parent})
+                if len(found) >= limit:
+                    return
+
+        walk(target, [target], {target})
+        return found
+
     # -- serialisation ----------------------------------------------------
 
     def to_json(self) -> dict[str, Any]:

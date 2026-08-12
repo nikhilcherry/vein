@@ -31,6 +31,7 @@ vein show [RUN] [--by self|cum|calls] [-n ROWS]
 vein dead [RUN ...] [--strict] [--json]
 vein diff BEFORE AFTER [--strict] [--structure-only] [--json]
 vein report [RUN] [-o FILE] [--open]
+vein paths FUNCTION [RUN]
 ```
 
 Recordings land in `.vein/runs/<name>.json` — plain JSON, safe to commit or
@@ -142,6 +143,21 @@ into one graph.
 
 On exit each process dumps its slice of the graph; `vein` folds them together
 and deletes the scratch directory.
+
+## Ask how something got called
+
+```console
+$ vein paths tax
+── examples/shop/pricing.py:27 tax ───────────────────────────────────
+  <module>  examples/shop/main.py
+    └─ main  ×1  examples/shop/main.py
+      └─ checkout  ×1  examples/shop/cart.py
+        └─ tax  ×1  examples/shop/pricing.py
+```
+
+Every edge shown was observed, with the number of times it was taken. A chain
+is a route through the recorded graph rather than one captured stack — the
+recording aggregates calls, it does not keep every individual one.
 
 ## Overhead
 

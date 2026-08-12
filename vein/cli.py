@@ -19,6 +19,7 @@ USAGE = """vein — see what your code actually does when it runs
   vein dead                            functions no recorded run ever executed
   vein diff <before> <after>           what changed at runtime between two runs
   vein report <run>                    write a self-contained HTML report
+  vein paths <function>                every call chain that reached a function
 """
 
 
@@ -382,6 +383,54 @@ def cmd_diff(args) -> int:
     return 0
 
 
+def cmd_paths(args) -> int:
+    root = find_root(args.root)
+    try:
+        run = load_run(root, args.run)
+    except (LookupError, ValueError) as exc:
+        print(f"vein: {exc}", file=sys.stderr)
+        return 1
+
+    matches = run.find(args.function)
+    if not matches:
+        print(
+            f"vein: nothing matching {args.function!r} ran in {run.name}",
+            file=sys.stderr,
+        )
+        return 1
+
+    for fid in matches[: args.matches]:
+        func = run.functions[fid]
+        print(term.rule(f"{func.file}:{func.line} {func.qualname}"))
+        chains = run.paths_to(fid, limit=args.limit)
+        if not chains:
+            print(term.paint("  reached only as an entry point", "grey"))
+        counts = run.edges
+        for chain in chains:
+            for depth, node in enumerate(chain):
+                step = run.functions[node]
+                prefix = "  " + "  " * depth + ("└─ " if depth else "")
+                name = (
+                    term.paint(step.qualname, "bold") if node == fid else step.qualname
+                )
+                edge = ""
+                if depth:
+                    seen = counts.get((chain[depth - 1], node), 0)
+                    edge = term.paint(f"  ×{seen}", "grey")
+                print(f"{prefix}{name}{edge}  {term.paint(step.file, 'grey')}")
+            print()
+    if len(matches) > args.matches:
+        print(term.paint(f"… {len(matches) - args.matches} more matches", "grey"))
+    print(
+        term.paint(
+            "  Every edge shown was observed (×N times). A chain is a route "
+            "through the recorded graph, not one captured stack.",
+            "grey",
+        )
+    )
+    return 0
+
+
 def cmd_report(args) -> int:
     from . import report as report_module
 
@@ -521,6 +570,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="ignore module-level <module> frames (import order noise)",
     )
 
+    p_paths = sub.add_parser(
+        "paths",
+        help="show the call chains through which a function was reached",
+        parents=[common],
+    )
+    p_paths.add_argument("function", help="function name or file:name substring")
+    p_paths.add_argument("run", nargs="?", default=None, help="run (default: latest)")
+    p_paths.add_argument("-n", "--limit", type=int, default=8, help="chains per match")
+    p_paths.add_argument(
+        "--matches", type=int, default=3, help="how many matching functions to show"
+    )
+
     p_report = sub.add_parser(
         "report",
         help="write a self-contained HTML report for a run",
@@ -566,6 +627,14 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_dead(args)
     if args.command == "diff":
         return cmd_diff(args)
+    if args.command == "paths":
+        if args.run is None:
+            runs = list_runs(find_root(args.root))
+            if not runs:
+                print("no runs recorded yet — try: vein run -- pytest", file=sys.stderr)
+                return 1
+            args.run = runs[0]
+        return cmd_paths(args)
     if args.command == "report":
         if args.run is None:
             runs = list_runs(find_root(args.root))
