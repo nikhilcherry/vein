@@ -157,6 +157,24 @@ class Recorder:
             if stack:
                 stack[-1][2] += elapsed
 
+    # -- forking ----------------------------------------------------------
+
+    def reset(self):
+        """Forget everything recorded so far.
+
+        A forked child inherits the parent's counts. They are the parent's to
+        report -- it writes its own recording -- so a child that kept them
+        would make every merged call count double.
+        """
+        self.funcs = []
+        self.by_code = {}
+        self.by_key = {}
+        self.edges = {}
+        self.threads = set()
+        self.max_depth = 0
+        self._local = threading.local()
+        self.started_ns = time.perf_counter_ns()
+
     # -- serialisation ----------------------------------------------------
 
     def snapshot(self):
@@ -291,6 +309,22 @@ def _make_backend(recorder):
 
 _ACTIVE = None
 
+#: Captured before any wrapping, so nested forks cannot build a chain.
+_REAL_OS_EXIT = os._exit
+
+
+def _fatal_signals():
+    """The signals that would kill us part-way through publishing a recording."""
+    import signal
+
+    return {
+        sig
+        for sig in (
+            getattr(signal, name, None) for name in ("SIGTERM", "SIGHUP", "SIGQUIT")
+        )
+        if sig is not None
+    }
+
 
 def install():
     """Start recording, based on the ``VEIN_*`` environment variables."""
@@ -306,6 +340,7 @@ def install():
     timing = os.environ.get("VEIN_TIMING", "1") != "0"
     comps = os.environ.get("VEIN_COMPREHENSIONS", "0") == "1"
 
+    _mark_live(out_dir)
     recorder = Recorder(roots, excludes, timing=timing, comprehensions=comps)
     backend = _make_backend(recorder)
     _ACTIVE = (recorder, backend)
@@ -313,10 +348,27 @@ def install():
     dumped = []
 
     def dump():
-        # atexit and the signal handler can both fire; write exactly once.
+        # atexit, the signal handler and the os._exit wrapper can all fire;
+        # write exactly once.
         if dumped:
             return
         dumped.append(True)
+
+        # Hold off the fatal signals until the part file is published. A pool
+        # worker gets SIGTERM twice -- once from Pool.terminate(), once from
+        # multiprocessing's exit function -- and the second delivery re-enters
+        # the handler, finds this flag already set, and kills the process while
+        # the write above is still in flight. That stranded the recording as a
+        # .tmp file and lost the worker's functions.
+        import signal
+
+        blocked = False
+        try:
+            signal.pthread_sigmask(signal.SIG_BLOCK, _fatal_signals())
+            blocked = True
+        except (AttributeError, ValueError, OSError):  # pragma: no cover
+            pass
+
         backend.stop()
         try:
             data = recorder.snapshot()
@@ -330,10 +382,71 @@ def install():
             os.replace(tmp, path)
         except Exception:  # pragma: no cover - never break the traced program
             pass
+        finally:
+            _clear_live(out_dir)
+            if blocked:
+                try:
+                    signal.pthread_sigmask(signal.SIG_UNBLOCK, _fatal_signals())
+                except (ValueError, OSError):  # pragma: no cover
+                    pass
 
     atexit.register(dump)
     _install_signal_dump(dump)
+    _install_fork_dump(recorder, dump, dumped, out_dir)
     return _ACTIVE
+
+
+def _live_marker(out_dir, pid=None):
+    return os.path.join(out_dir, "live-%d" % (pid if pid else os.getpid()))
+
+
+def _mark_live(out_dir):
+    """Announce that this process still owes a recording.
+
+    The runner waits on these instead of guessing how long a worker needs.
+    """
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+        with open(_live_marker(out_dir), "w"):
+            pass
+    except OSError:  # pragma: no cover - never break the traced program
+        pass
+
+
+def _clear_live(out_dir):
+    try:
+        os.unlink(_live_marker(out_dir))
+    except OSError:  # pragma: no cover
+        pass
+
+
+def _install_fork_dump(recorder, dump, dumped, out_dir):
+    """Make forked children record their own work, and write it before dying.
+
+    The shim reaches a new process through ``PYTHONPATH`` and ``sitecustomize``,
+    which only run on *exec*. A forked child inherits an already-installed
+    tracer instead, so it traces faithfully -- and then throws the result away,
+    because multiprocessing workers, ``Process`` targets and raw ``os.fork``
+    users all leave through ``os._exit``, which by design skips ``atexit``.
+
+    The visible symptom was that a function called only inside a worker was
+    reported as never having run, which is precisely the claim this tool exists
+    to get right.
+    """
+    if not hasattr(os, "register_at_fork"):  # pragma: no cover - non-POSIX
+        return
+
+    def after_in_child():
+        recorder.reset()
+        del dumped[:]  # the parent may have dumped; this child still owes one
+        _mark_live(out_dir)
+        os._exit = _child_exit
+
+    def _child_exit(status):
+        dump()
+        _REAL_OS_EXIT(status)
+
+    os.register_at_fork(after_in_child=after_in_child)
 
 
 def _install_signal_dump(dump):

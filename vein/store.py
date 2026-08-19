@@ -102,6 +102,10 @@ class Run:
     wall_s: float = 0.0
     exit_code: int = 0
     processes: int = 1
+    #: Processes that were killed before they could publish their recording.
+    #: Non-zero means this run saw less than actually ran, so "never executed"
+    #: is no longer a safe claim.
+    lost_processes: int = 0
     threads: int = 1
     backend: str = ""
     timing: bool = True
@@ -202,6 +206,7 @@ class Run:
             "wall_s": round(self.wall_s, 6),
             "exit_code": self.exit_code,
             "processes": self.processes,
+            "lost_processes": self.lost_processes,
             "threads": self.threads,
             "backend": self.backend,
             "timing": self.timing,
@@ -226,6 +231,7 @@ class Run:
             wall_s=data.get("wall_s", 0.0),
             exit_code=data.get("exit_code", 0),
             processes=data.get("processes", 1),
+            lost_processes=data.get("lost_processes", 0),
             threads=data.get("threads", 1),
             backend=data.get("backend", ""),
             timing=data.get("timing", True),

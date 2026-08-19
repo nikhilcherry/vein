@@ -195,11 +195,16 @@ def cmd_show(args) -> int:
     return 0
 
 
-def _executed_keys(root: str, names: list[str]) -> tuple[set, list[str]]:
-    """Union of every function observed across the given (or all) runs."""
+def _executed_keys(root: str, names: list[str]) -> tuple[set, list[str], int]:
+    """Union of every function observed across the given (or all) runs.
+
+    Also totals the processes those runs failed to capture, so callers can say
+    how much of the picture is missing.
+    """
     names = names or list_runs(root)
     executed: set = set()
     used: list[str] = []
+    lost = 0
     for name in names:
         try:
             run = load_run(root, name)
@@ -207,13 +212,33 @@ def _executed_keys(root: str, names: list[str]) -> tuple[set, list[str]]:
             print(f"vein: {exc}", file=sys.stderr)
             continue
         used.append(run.name)
+        lost += run.lost_processes
         executed.update(f.key for f in run.functions)
-    return executed, used
+    return executed, used, lost
+
+
+def _warn_incomplete(lost: int, term) -> None:
+    """Say so when a recording is known to be missing processes.
+
+    "This function never ran" is only worth acting on if everything that ran
+    was seen. A worker killed outright during pool teardown runs no Python on
+    its way out, so it cannot report -- and silently folding that into a dead
+    list is how live code gets deleted.
+    """
+    if not lost:
+        return
+    print(
+        term.paint(
+            f"  warning: {lost} process(es) were killed before reporting; "
+            "this run saw less than actually executed",
+            "yellow",
+        )
+    )
 
 
 def cmd_dead(args) -> int:
     root = find_root(args.root)
-    executed, used = _executed_keys(root, args.runs)
+    executed, used, lost = _executed_keys(root, args.runs)
     if not used:
         print(
             "vein: no runs to compare against — record one first "
@@ -232,6 +257,7 @@ def cmd_dead(args) -> int:
             json.dumps(
                 {
                     "runs": used,
+                    "lost_processes": lost,
                     "defined": len(definitions),
                     "executed": len(definitions) - len(dead),
                     "dead": [
@@ -253,6 +279,7 @@ def cmd_dead(args) -> int:
     covered = len(definitions) - len(dead)
     share = covered / len(definitions) * 100 if definitions else 100.0
     print(term.rule(f"dead code vs {len(used)} run(s): {', '.join(used)}"))
+    _warn_incomplete(lost, term)
     print(
         f"  {covered}/{len(definitions)} defined functions executed "
         f"({share:.0f}%), {len(dead)} never ran "

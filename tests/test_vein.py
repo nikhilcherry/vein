@@ -170,6 +170,100 @@ def test_traces_child_processes(tmp_path):
     assert run.processes >= 2
 
 
+def test_traces_forked_children(tmp_path):
+    """A forked child must report what it ran, even leaving via os._exit.
+
+    The shim reaches a new process through PYTHONPATH and sitecustomize, which
+    only run on *exec*. A fork inherits the tracer instead and then leaves
+    through ``os._exit``, which skips ``atexit`` -- so the child traced its work
+    and threw it away, and a function called only in a worker was reported as
+    never having run.
+    """
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\n")
+    (tmp_path / "forker.py").write_text(
+        "import os\n"
+        "def only_in_child():\n"
+        "    return 41 + 1\n"
+        "def parent_side():\n"
+        "    return 1\n"
+        "parent_side()\n"
+        "pid = os.fork()\n"
+        "if pid == 0:\n"
+        "    only_in_child()\n"
+        "    os._exit(0)\n"
+        "os.waitpid(pid, 0)\n"
+    )
+    run, _ = runner.record(
+        [sys.executable, str(tmp_path / "forker.py")],
+        root=str(tmp_path),
+        name="forked",
+        quiet=True,
+    )
+    names = {f.qualname for f in run.functions}
+    assert "parent_side" in names
+    assert "only_in_child" in names, "the forked child's work was thrown away"
+    assert run.processes >= 2
+
+
+def test_traces_multiprocessing_workers(tmp_path):
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\n")
+    (tmp_path / "pool.py").write_text(
+        "import multiprocessing as mp\n"
+        "def in_worker(n):\n"
+        "    return n * n\n"
+        "def main():\n"
+        "    procs = [mp.Process(target=in_worker, args=(3,)) for _ in range(2)]\n"
+        "    for p in procs:\n"
+        "        p.start()\n"
+        "    for p in procs:\n"
+        "        p.join()\n"
+        "if __name__ == '__main__':\n"
+        "    main()\n"
+    )
+    run, _ = runner.record(
+        [sys.executable, str(tmp_path / "pool.py")],
+        root=str(tmp_path),
+        name="pool",
+        quiet=True,
+    )
+    names = {f.qualname for f in run.functions}
+    assert "in_worker" in names, "multiprocessing workers were not recorded"
+
+
+def test_forked_child_does_not_re_report_the_parent(tmp_path):
+    """The child inherits the parent's counts; only one of them may report."""
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\n")
+    (tmp_path / "twice.py").write_text(
+        "import os\n"
+        "def counted():\n"
+        "    return 1\n"
+        "counted()\n"
+        "pid = os.fork()\n"
+        "if pid == 0:\n"
+        "    os._exit(0)\n"
+        "os.waitpid(pid, 0)\n"
+    )
+    run, _ = runner.record(
+        [sys.executable, str(tmp_path / "twice.py")],
+        root=str(tmp_path),
+        name="twice",
+        quiet=True,
+    )
+    counted = next(f for f in run.functions if f.qualname == "counted")
+    assert counted.calls == 1, "the fork duplicated the parent's call count"
+
+
+def test_a_process_killed_before_reporting_is_counted(tmp_path):
+    """A worker killed outright cannot report, and that has to be visible."""
+    out_dir = tmp_path / "parts"
+    out_dir.mkdir()
+    # A marker whose pid is long gone: the process died still owing a part.
+    (out_dir / "live-2147480000").write_text("")
+    lost = runner._await_late_recordings(str(out_dir), timeout=2.0)
+    assert lost == 1
+    assert not list(out_dir.iterdir()), "the stale marker should be cleaned up"
+
+
 def test_scratch_directory_is_cleaned_up(project):
     record(project, "slow")
     tmp = project / ".vein" / "tmp"

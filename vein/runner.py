@@ -103,6 +103,65 @@ def merge_parts(part_files: list[str], root: str):
     return ordered, id_edges, processes, max(threads, 1)
 
 
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:  # exists, owned by somebody else
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _await_late_recordings(out_dir: str, timeout: float = 10.0) -> int:
+    """Wait for descendants that are still writing their recording.
+
+    ``subprocess.run`` returns when the *direct* child exits, but a forked
+    grandchild -- a pool worker being shut down -- can still be mid-write.
+    Collecting the directory at that moment dropped its recording, so the same
+    command could report a different set of executed functions run to run.
+
+    Each traced process leaves a ``live-<pid>`` marker until its part is
+    published, so this waits on evidence rather than on a fixed delay: the
+    common single-process case returns immediately, and a marker left behind by
+    a process that died without cleaning up is discarded once its pid is gone.
+
+    Returns the number of processes that died still owing a recording -- a pool
+    worker killed outright during teardown runs no Python on its way out, so
+    nothing can make it report. The count travels with the run so that
+    ``vein dead`` can say its answer is incomplete instead of quietly calling
+    live code dead.
+    """
+    lost = 0
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            markers = [f for f in os.listdir(out_dir) if f.startswith("live-")]
+        except OSError:
+            return
+        waiting = False
+        for marker in markers:
+            try:
+                pid = int(marker[5:])
+            except ValueError:
+                continue
+            if _pid_alive(pid):
+                waiting = True
+            else:
+                # Died without publishing; nothing more is coming from it.
+                lost += 1
+                try:
+                    os.unlink(os.path.join(out_dir, marker))
+                except OSError:
+                    pass
+        if not waiting:
+            return lost
+        time.sleep(0.005)
+    return lost
+
+
 def record(
     command: list[str],
     *,
@@ -146,6 +205,7 @@ def record(
         exit_code = 130
     wall = time.perf_counter() - begin
 
+    lost_processes = _await_late_recordings(out_dir)
     parts = sorted(
         os.path.join(out_dir, f) for f in os.listdir(out_dir) if f.endswith(".json")
     )
@@ -167,6 +227,7 @@ def record(
         wall_s=wall,
         exit_code=exit_code,
         processes=processes,
+        lost_processes=lost_processes,
         threads=threads,
         backend=backend,
         timing=timing,
