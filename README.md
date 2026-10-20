@@ -53,6 +53,12 @@ $ vein show slow
 ████▌           1   78.0µs  137.3µs  examples/shop/cart.py:11  checkout
 ```
 
+## One-file report
+
+`vein report` writes a single self-contained HTML page (no external assets): sortable per-file and per-function timings, a filter, a "never ran" toggle, and click-through callers and callees.
+
+![The vein report for the shop example: 12 functions ran, 1 never ran, with per-file self-time bars and the dead function legacy_coupon greyed out](docs/images/report.png)
+
 ## Find code that never runs
 
 `vein dead` walks your source with `ast`, builds the full inventory of
